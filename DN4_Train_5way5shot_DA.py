@@ -43,6 +43,7 @@ sys.dont_write_bytecode = True
 # ============================ Data & Networks =====================================
 from dataset.datasets_csv import Imagefolder_csv
 import models.network as DN4Net
+from models.semantic_alignment import compute_semantic_alignment
 # ==================================================================================
 
 
@@ -79,6 +80,8 @@ parser.add_argument('--nc', type=int, default=1, help='input image channels')
 parser.add_argument('--clamp_lower', type=float, default=-0.01)
 parser.add_argument('--clamp_upper', type=float, default=0.01)
 parser.add_argument('--print_freq', '-p', default=100, type=int, metavar='N', help='print frequency (default: 100)')
+parser.add_argument('--sa_weight', type=float, default=0.5, help='weight for semantic alignment regularization')
+parser.add_argument('--sa_samples', type=int, default=64, help='number of spatial locations sampled for SA loss')
 opt = parser.parse_args()
 opt.cuda = True
 cudnn.benchmark = True
@@ -96,9 +99,10 @@ def adjust_learning_rate(optimizer, epoch_num):
 
 def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 	batch_time = AverageMeter()
-	data_time = AverageMeter()
-	losses = AverageMeter()
-	top1 = AverageMeter()
+        data_time = AverageMeter()
+        losses = AverageMeter()
+        top1 = AverageMeter()
+        sa_losses = AverageMeter()
 
 
 	end = time.time()
@@ -122,20 +126,37 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 		target = torch.cat(query_targets, 0)
 		target = target.cuda()
 
-		# Calculate the output
-		output = model(input_var1, input_var2)
-		loss = criterion(output, target)
+                # Calculate the output
+                if opt.sa_weight > 0:
+                        output, feature_pack = model(input_var1, input_var2, return_features=True)
+                        sa_loss, sa_count = compute_semantic_alignment(
+                                feature_pack,
+                                target,
+                                support_targets,
+                                max_positions=opt.sa_samples,
+                        )
+                else:
+                        output = model(input_var1, input_var2)
+                        feature_pack = None
+                        sa_loss, sa_count = None, 0
 
-		# Compute gradients and do SGD step
-		optimizer.zero_grad()
-		loss.backward()
-		optimizer.step()
+                task_loss = criterion(output, target)
 
-	  
-		# Measure accuracy and record loss
-		prec1, _ = accuracy(output, target, topk=(1,3))
-		losses.update(loss.item(), query_images.size(0))
-		top1.update(prec1[0], query_images.size(0))
+                total_loss = task_loss
+                if sa_loss is not None:
+                        total_loss = total_loss + opt.sa_weight * sa_loss
+                        sa_losses.update(sa_loss.item(), sa_count)
+
+                # Compute gradients and do SGD step
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+
+
+                # Measure accuracy and record loss
+                prec1, _ = accuracy(output, target, topk=(1,3))
+                losses.update(total_loss.item(), query_images.size(0))
+                top1.update(prec1[0], query_images.size(0))
 
 
 		# Measure elapsed time
@@ -146,19 +167,25 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 		#============== print the intermediate results ==============#
 		if episode_index % opt.print_freq == 0 and episode_index != 0:
 
-			print('Eposide-({0}): [{1}/{2}]\t'
-				'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-				'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-				'Loss {loss.val:.3f} ({loss.avg:.3f})\t'
-				'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-					epoch_index, episode_index, len(train_loader), batch_time=batch_time, data_time=data_time, loss=losses, top1=top1))
-
-			print('Eposide-({0}): [{1}/{2}]\t'
-				'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-				'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-				'Loss {loss.val:.3f} ({loss.avg:.3f})\t'
-				'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-					epoch_index, episode_index, len(train_loader), batch_time=batch_time, data_time=data_time, loss=losses, top1=top1), file=F_txt)
+                        log_msg = (
+                                'Eposide-({0}): [{1}/{2}]\t'
+                                'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                                'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                                'Loss {loss.val:.3f} ({loss.avg:.3f})\t'
+                                'SA {sa.val:.3f} ({sa.avg:.3f})\t'
+                                'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'
+                        ).format(
+                                epoch_index,
+                                episode_index,
+                                len(train_loader),
+                                batch_time=batch_time,
+                                data_time=data_time,
+                                loss=losses,
+                                sa=sa_losses,
+                                top1=top1,
+                        )
+                        print(log_msg)
+                        print(log_msg, file=F_txt)
 
 
 

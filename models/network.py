@@ -171,16 +171,20 @@ class FourLayer_64F(nn.Module):
 
         self.imgtoclass = ImgtoClass_Metric(neighbor_k=neighbor_k)
 
-    def forward(self, input1, input2):
+    def forward(self, input1, input2, return_features=False):
         # input1: [Q, 3, 84, 84] 查询集
         # input2: [N, K, 3, 84, 84] 支持集
         q = self.features(input1)  # [Q, 64, 21, 21]
+        support_features = []
         S = []
         for i in range(len(input2)):
             support_set = self.features(input2[i])      # [K, 64, 21, 21]
+            support_features.append(support_set)
             class_proto = class_proto_attention(support_set)  # [64, 21, 21]
             S.append(class_proto)
         x = self.imgtoclass(q, S)  # [Q, num_classes]
+        if return_features:
+            return x, (q, support_features)
         return x
 
       
@@ -334,15 +338,17 @@ class ResNetLike(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def forward(self, input1, input2):
+    def forward(self, input1, input2, return_features=False):
 
         # extract features of input1--query image
         q = self.feat_extractor(input1)
 
         # extract features of input2--support set
+        support_features = []
         S = []
         for i in range(len(input2)):
             support_set_sam = self.feat_extractor(input2[i])
+            support_features.append(support_set_sam)
             B, C, h, w = support_set_sam.size()
             support_set_sam = support_set_sam.permute(1, 0, 2, 3)
             support_set_sam = support_set_sam.contiguous().view(C, -1)
@@ -350,4 +356,7 @@ class ResNetLike(nn.Module):
 
         x = self.imgtoclass(q, S)  # get Batch*num_classes
 
-        return
+        if return_features:
+            return x, (q, support_features)
+
+        return x
